@@ -8,10 +8,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Lib.Harmony" Version="2.4.2" />
-  </ItemGroup>
-
-  <ItemGroup>
     <Reference Include="OTAPI">
       <HintPath>lib\OTAPI.dll</HintPath>
       <Private>false</Private>
