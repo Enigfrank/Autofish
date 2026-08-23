@@ -29,6 +29,11 @@ namespace AutoFishPlugin
 
         private static bool ReflectionReady;
 
+        // 运行期统计：走了几次原版真实掉落链路、几次自定义兜底表、
+        private static long VanillaUseCount;
+        private static long FallbackUseCount;
+        private static long FallbackFailureCount;
+
         private class PlayerState
         {
             public bool Enabled { get; set; } = false;
@@ -59,7 +64,7 @@ namespace AutoFishPlugin
 
             Commands.ChatCommands.Add(new Command(UsePermission, FishCommands, "autofish", "af")
             {
-                HelpText = "自动钓鱼指令. 输入 /af 开关功能，输入 /af reload 重载配置"
+                HelpText = "自动钓鱼指令。/af 开关功能，/af reload 重载配置，/af status 查看原版/兜底掉落路径命中统计（需管理权限）。"
             });
         }
 
@@ -158,6 +163,33 @@ namespace AutoFishPlugin
 
         private void FishCommands(CommandArgs args)
         {
+            if (args.Parameters.Count > 0 && args.Parameters[0].Equals("status", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!args.Player.HasPermission(AdminPermission))
+                {
+                    args.Player.SendErrorMessage("你没有查看自动钓鱼状态的权限！");
+                    return;
+                }
+
+                long total = VanillaUseCount + FallbackUseCount;
+                string ratio = total > 0 ? $"{(double)VanillaUseCount / total:P1}" : "暂无数据";
+
+                args.Player.SendInfoMessage(
+                    "[自动钓鱼] 反射方法就绪: {0} | 原版链路命中: {1} 次 | 兜底表命中: {2} 次 | " +
+                    "原版占比: {3} | 原版链路调用失败: {4} 次",
+                    ReflectionReady, VanillaUseCount, FallbackUseCount, ratio, FallbackFailureCount);
+
+                if (!ReflectionReady)
+                {
+                    args.Player.SendWarningMessage("[自动钓鱼] 原版反射未就绪，请反馈至许工!");
+                }
+                else if (FallbackUseCount > 0 && VanillaUseCount == 0)
+                {
+                    args.Player.SendWarningMessage("[自动钓鱼] 原版反射方法调用失败，请反馈至许工!");
+                }
+                return;
+            }
+
             if (args.Parameters.Count > 0 && args.Parameters[0].Equals("reload", StringComparison.OrdinalIgnoreCase))
             {
                 if (!args.Player.HasPermission(AdminPermission))
@@ -186,7 +218,7 @@ namespace AutoFishPlugin
 
             if (state.Enabled)
             {
-                args.Player.SendSuccessMessage("[挂机钓鱼] 已开启！咬钩延迟: {0:F2}秒 | 鱼饵消耗倍率: {1:F2}x。请手动抛竿一次以启动",
+                args.Player.SendSuccessMessage("[挂机钓鱼] 已开启！咬钩延迟: {0:F2}秒 | 鱼饵消耗倍率: {1:F2}x 请手动抛竿一次以启动",
                     Config.BiteDelayTicks / 60f, Config.BaitConsumeMultiplier);
             }
             else
@@ -267,7 +299,7 @@ namespace AutoFishPlugin
 
                 if (player.HeldItem == null || player.HeldItem.fishingPole <= 0)
                 {
-                    tsPlayer.SendWarningMessage("[挂机钓鱼] 未手持钓竿，挂机已暂停. 手持钓竿抛竿即可继续");
+                    tsPlayer.SendWarningMessage("[挂机钓鱼] 未手持钓竿，挂机已暂停 手持钓竿抛竿即可继续");
                     continue;
                 }
 
@@ -303,24 +335,7 @@ namespace AutoFishPlugin
 
         private static void ExecuteFishingReward(Player player, Projectile proj)
         {
-            int polePower = player.HeldItem != null ? player.HeldItem.fishingPole : 0;
-            int baitPower = 0;
-            int baitType = 0;
-
-            for (int i = 0; i < 58; i++)
-            {
-                Item item = player.inventory[i];
-                if (item != null && item.stack > 0 && item.bait > 0)
-                {
-                    baitPower = item.bait;
-                    baitType = item.type;
-                    break;
-                }
-            }
-
-            int finalFishingLevel = player.fishingSkill + polePower + baitPower;
-            if (finalFishingLevel <= 0)
-                finalFishingLevel = 35;
+            PlayerFishingConditions conditions = player.GetFishingConditions();
 
             FishingAttempt attempt = default;
             attempt.X = (int)(proj.Center.X / 16f);
@@ -330,7 +345,7 @@ namespace AutoFishPlugin
             attempt.inHoney = proj.honeyWet;
             attempt.waterTilesCount = 300;
             attempt.waterNeededToFish = proj.honeyWet ? 50 : 75;
-            attempt.fishingLevel = finalFishingLevel;
+            attempt.fishingLevel = conditions.FinalFishingLevel;
 
             if (attempt.Y < Main.worldSurface * 0.45)
                 attempt.heightLevel = 0;
@@ -343,12 +358,6 @@ namespace AutoFishPlugin
             else
                 attempt.heightLevel = 4;
 
-            PlayerFishingConditions conditions = default;
-            conditions.PolePower = polePower;
-            conditions.PoleItemType = player.HeldItem != null ? player.HeldItem.type : 0;
-            conditions.BaitPower = baitPower;
-            conditions.BaitItemType = baitType;
-            conditions.FinalFishingLevel = finalFishingLevel;
             attempt.playerFishingConditions = conditions;
 
             int dropItem = 0;
@@ -358,8 +367,6 @@ namespace AutoFishPlugin
             {
                 try
                 {
-                    // 步骤 1：按稀有度档位摇出 common/uncommon/rare/veryrare/legendary/crate
-                    // 各档命中数量——原版实现里这一步在 RollEnemySpawns/RollItemDrop 之前，
                     object[] dropLevelArgs = { attempt.fishingLevel, false, false, false, false, false, false };
                     object? dropLevelTarget = MiRollDropLevels!.IsStatic ? null : proj;
                     MiRollDropLevels!.Invoke(dropLevelTarget, dropLevelArgs);
@@ -401,14 +408,24 @@ namespace AutoFishPlugin
                 }
                 catch (Exception ex)
                 {
-                    TShock.Log.ConsoleDebug($"[AutoFish] 原版掉落链路调用异常，回退自定义掉落池: {ex}");
+                    FallbackFailureCount++;
+                    if (FallbackFailureCount == 1 || FallbackFailureCount % 50 == 0)
+                    {
+                        TShock.Log.ConsoleError(
+                            $"[AutoFish] 原版掉落链路调用异常（累计 {FallbackFailureCount} 次），" +
+                            $"本次及此前调用均回退到自定义掉落池，掉落分布仅为近似值: {ex}");
+                    }
                 }
             }
 
             if (!usedVanillaPath)
             {
                 dropItem = RollRandomBiomeFish(player, attempt);
-                TShock.Log.ConsoleDebug($"[AutoFish] 已使用自定义兜底掉落池: ItemID={dropItem}");
+                FallbackUseCount++;
+            }
+            else
+            {
+                VanillaUseCount++;
             }
 
             if (dropItem <= 0)
