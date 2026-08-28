@@ -3,6 +3,7 @@ using System.Reflection;
 using Microsoft.Xna.Framework;
 using Terraria;
 using Terraria.DataStructures;
+using Terraria.GameContent.FishDropRules;
 using Terraria.ID;
 using TerrariaApi.Server;
 using TShockAPI;
@@ -16,20 +17,20 @@ namespace AutoFishPlugin
         public override string Name => "AutoFish";
         public override string Author => "Enigfrank";
         public override string Description => "挂机钓鱼插件";
-        public override Version Version => new(1, 7, 0);
+        public override Version Version => new(1, 7, 5);
 
         public const string UsePermission = "autofish.use";
         public const string AdminPermission = "autofish.admin";
 
         public static ConfigFile Config = new();
-        private static MethodInfo? MiRollDropLevels;   // (int, out int,out int,out int,out int,out int,out int)
+        private static MethodInfo? MiRollDropLevels;   // (int, out bool, out bool, out bool, out bool, out bool, out bool)
         private static MethodInfo? MiProbeQuestFish;   // (ref FishingAttempt)
         private static MethodInfo? MiRollEnemySpawns;  // (ref FishingAttempt)
         private static MethodInfo? MiRollItemDrop;     // (ref FishingAttempt)
+        private static FieldInfo? FiProjectileContext; // Projectile._context
 
         private static bool ReflectionReady;
 
-        // 运行期统计：走了几次原版真实掉落链路、几次自定义兜底表、
         private static long VanillaUseCount;
         private static long FallbackUseCount;
         private static long FallbackFailureCount;
@@ -64,7 +65,7 @@ namespace AutoFishPlugin
 
             Commands.ChatCommands.Add(new Command(UsePermission, FishCommands, "autofish", "af")
             {
-                HelpText = "自动钓鱼指令。/af 开关功能，/af reload 重载配置，/af status 查看原版/兜底掉落路径命中统计（需管理权限）。"
+                HelpText = "自动钓鱼指令。/af 开关功能，/af reload 重载配置，/af status 查看掉落统计。"
             });
         }
 
@@ -95,29 +96,25 @@ namespace AutoFishPlugin
                 MiProbeQuestFish = FindMethod(typeof(Projectile), "FishingCheck_ProbeForQuestFish");
                 MiRollEnemySpawns = FindMethod(typeof(Projectile), "FishingCheck_RollEnemySpawns");
                 MiRollItemDrop = FindMethod(typeof(Projectile), "FishingCheck_RollItemDrop");
+                FiProjectileContext = typeof(Projectile).GetField("_context",
+                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
 
                 ReflectionReady = MiRollDropLevels != null && MiProbeQuestFish != null &&
-                                   MiRollEnemySpawns != null && MiRollItemDrop != null;
+                                  MiRollEnemySpawns != null && MiRollItemDrop != null &&
+                                  FiProjectileContext != null;
 
                 TShock.Log.ConsoleInfo(
-                    $"[AutoFish] 原版钓鱼方法反射结果: " +
+                    $"[AutoFish] 原版钓鱼方法反射就绪状态: " +
                     $"RollDropLevels={(MiRollDropLevels != null)} " +
                     $"ProbeForQuestFish={(MiProbeQuestFish != null)} " +
                     $"RollEnemySpawns={(MiRollEnemySpawns != null)} " +
-                    $"RollItemDrop={(MiRollItemDrop != null)}");
-
-                if (!ReflectionReady)
-                {
-                    TShock.Log.ConsoleError(
-                        "[AutoFish] 未能完整获取原版钓鱼掉落链路方法，缺失的部分将始终使用" +
-                        "自定义兜底掉落表（RollRandomBiomeFish），无法完全还原原版随机机制。" +
-                        "请用反编译工具核实当前服务端程序集里的真实方法名/签名。");
-                }
+                    $"RollItemDrop={(MiRollItemDrop != null)} " +
+                    $"ProjectileContext={(FiProjectileContext != null)}");
             }
             catch (Exception ex)
             {
                 ReflectionReady = false;
-                TShock.Log.ConsoleError($"[AutoFish] 钓鱼反射初始化异常，将回退到自定义掉落池: {ex.Message}");
+                TShock.Log.ConsoleError($"[AutoFish] 钓鱼反射初始化异常: {ex.Message}");
             }
         }
 
@@ -175,18 +172,9 @@ namespace AutoFishPlugin
                 string ratio = total > 0 ? $"{(double)VanillaUseCount / total:P1}" : "暂无数据";
 
                 args.Player.SendInfoMessage(
-                    "[自动钓鱼] 反射方法就绪: {0} | 原版链路命中: {1} 次 | 兜底表命中: {2} 次 | " +
-                    "原版占比: {3} | 原版链路调用失败: {4} 次",
+                    "[自动钓鱼] 反射就绪: {0} | 原版链路命中: {1} 次 | 兜底表命中: {2} 次 | " +
+                    "原版占比: {3} | 原版链路异常失败: {4} 次",
                     ReflectionReady, VanillaUseCount, FallbackUseCount, ratio, FallbackFailureCount);
-
-                if (!ReflectionReady)
-                {
-                    args.Player.SendWarningMessage("[自动钓鱼] 原版反射未就绪，请反馈至许工!");
-                }
-                else if (FallbackUseCount > 0 && VanillaUseCount == 0)
-                {
-                    args.Player.SendWarningMessage("[自动钓鱼] 原版反射方法调用失败，请反馈至许工!");
-                }
                 return;
             }
 
@@ -199,7 +187,7 @@ namespace AutoFishPlugin
                 }
 
                 Config = ConfigFile.Read();
-                args.Player.SendSuccessMessage("[自动钓鱼] 配置文件已重载！当前咬钩延迟: {0} 帧 | 鱼饵消耗倍率: {1:F2}x",
+                args.Player.SendSuccessMessage("[自动钓鱼] 配置已重载！咬钩延迟: {0} 帧 | 鱼饵消耗倍率: {1:F2}x",
                     Config.BiteDelayTicks, Config.BaitConsumeMultiplier);
                 return;
             }
@@ -218,7 +206,7 @@ namespace AutoFishPlugin
 
             if (state.Enabled)
             {
-                args.Player.SendSuccessMessage("[挂机钓鱼] 已开启！咬钩延迟: {0:F2}秒 | 鱼饵消耗倍率: {1:F2}x 请手动抛竿一次以启动",
+                args.Player.SendSuccessMessage("[挂机钓鱼] 已开启！咬钩延迟: {0:F2}秒 | 鱼饵消耗倍率: {1:F2}x 请手动抛竿一次启动",
                     Config.BiteDelayTicks / 60f, Config.BaitConsumeMultiplier);
             }
             else
@@ -257,6 +245,16 @@ namespace AutoFishPlugin
                         state.WaterTicks++;
                         if (state.WaterTicks >= Config.BiteDelayTicks)
                         {
+                            if (!HasBait(player))
+                            {
+                                tsPlayer.SendWarningMessage("[挂机钓鱼] 鱼饵已耗尽，挂机已暂停");
+                                state.Enabled = false;
+                                proj.active = false;
+                                proj.Kill();
+                                NetMessage.SendData(29, -1, -1, null, proj.identity, owner);
+                                continue;
+                            }
+
                             ExecuteFishingReward(player, proj);
                             TryConsumeBait(player, Config.BaitConsumeMultiplier);
 
@@ -297,12 +295,6 @@ namespace AutoFishPlugin
 
                 state.WaitingRecast = false;
 
-                if (player.HeldItem == null || player.HeldItem.fishingPole <= 0)
-                {
-                    tsPlayer.SendWarningMessage("[挂机钓鱼] 未手持钓竿，挂机已暂停 手持钓竿抛竿即可继续");
-                    continue;
-                }
-
                 if (!HasBait(player))
                 {
                     tsPlayer.SendWarningMessage("[挂机钓鱼] 鱼饵已耗尽，挂机已停止");
@@ -329,13 +321,52 @@ namespace AutoFishPlugin
                 );
 
                 if (newProjIndex >= 0 && newProjIndex < Main.maxProjectiles)
+                {
+                    Main.projectile[newProjIndex].owner = player.whoAmI;
                     NetMessage.SendData(27, -1, -1, null, newProjIndex);
+                }
             }
         }
 
         private static void ExecuteFishingReward(Player player, Projectile proj)
         {
+            proj.owner = player.whoAmI;
+
             PlayerFishingConditions conditions = player.GetFishingConditions();
+
+            // 补全钓竿
+            if (conditions.PoleItemType <= 0)
+            {
+                for (int i = 0; i < 58; i++)
+                {
+                    if (player.inventory[i] != null && player.inventory[i].fishingPole > 0)
+                    {
+                        conditions.PoleItemType = player.inventory[i].type;
+                        conditions.PolePower = player.inventory[i].fishingPole;
+                        break;
+                    }
+                }
+            }
+
+            // 补全鱼饵（过滤松露虫，防止挂机误消耗或误召唤 Boss）
+            if (conditions.BaitItemType <= 0 || conditions.BaitItemType == ItemID.TruffleWorm)
+            {
+                for (int i = 0; i < 58; i++)
+                {
+                    Item invItem = player.inventory[i];
+                    if (invItem != null && invItem.stack > 0 && invItem.bait > 0 && invItem.type != ItemID.TruffleWorm)
+                    {
+                        conditions.BaitItemType = invItem.type;
+                        conditions.BaitPower = invItem.bait;
+                        break;
+                    }
+                }
+            }
+
+            if (conditions.FinalFishingLevel <= 0)
+            {
+                conditions.FinalFishingLevel = conditions.PolePower + conditions.BaitPower + player.fishingSkill;
+            }
 
             FishingAttempt attempt = default;
             attempt.X = (int)(proj.Center.X / 16f);
@@ -343,9 +374,24 @@ namespace AutoFishPlugin
             attempt.bobberType = proj.type;
             attempt.inLava = proj.lavaWet;
             attempt.inHoney = proj.honeyWet;
-            attempt.waterTilesCount = 300;
+
+            // 海洋大水体判定（满足 IsOriginalOcean 与 Water1000 规则）
+            bool isAtOcean = player.ZoneBeach || attempt.X < 380 || attempt.X > Main.maxTilesX - 380;
+            attempt.waterTilesCount = isAtOcean ? 1001 : 300;
             attempt.waterNeededToFish = proj.honeyWet ? 50 : 75;
+            attempt.waterQuality = 1f;
+
+            // 熔岩垂钓资格计算
+            bool hasLavaBait = conditions.BaitItemType > 0 &&
+                               conditions.BaitItemType < ItemID.Sets.IsLavaBait.Length &&
+                               ItemID.Sets.IsLavaBait[conditions.BaitItemType];
+
+            attempt.CanFishInLava = player.accLavaFishing ||
+                                   conditions.PoleItemType == ItemID.HotlineFishingHook ||
+                                   hasLavaBait;
+
             attempt.fishingLevel = conditions.FinalFishingLevel;
+            attempt.playerFishingConditions = conditions;
 
             if (attempt.Y < Main.worldSurface * 0.45)
                 attempt.heightLevel = 0;
@@ -358,15 +404,14 @@ namespace AutoFishPlugin
             else
                 attempt.heightLevel = 4;
 
-            attempt.playerFishingConditions = conditions;
-
             int dropItem = 0;
-            bool usedVanillaPath = false;
+            bool vanillaSuccess = false;
 
             if (ReflectionReady)
             {
                 try
                 {
+                    // 步骤 1：稀有度掷骰
                     object[] dropLevelArgs = { attempt.fishingLevel, false, false, false, false, false, false };
                     object? dropLevelTarget = MiRollDropLevels!.IsStatic ? null : proj;
                     MiRollDropLevels!.Invoke(dropLevelTarget, dropLevelArgs);
@@ -377,13 +422,13 @@ namespace AutoFishPlugin
                     attempt.legendary = (bool)dropLevelArgs[5];
                     attempt.crate = (bool)dropLevelArgs[6];
 
-                    // 步骤 2：渔夫任务鱼判定
+                    // 步骤 2：任务鱼判定
                     object[] questArgs = { attempt };
                     object? questTarget = MiProbeQuestFish!.IsStatic ? null : proj;
                     MiProbeQuestFish!.Invoke(questTarget, questArgs);
                     attempt = (FishingAttempt)questArgs[0];
 
-                    // 步骤 3：怪物入侵（宝箱怪等）判定
+                    // 步骤 3：敌怪生成判定
                     object[] enemyArgs = { attempt };
                     object? enemyTarget = MiRollEnemySpawns!.IsStatic ? null : proj;
                     MiRollEnemySpawns!.Invoke(enemyTarget, enemyArgs);
@@ -397,39 +442,74 @@ namespace AutoFishPlugin
                         return;
                     }
 
-                    // 步骤 4：真正的物品掉落判定
+                    // 核心修复点：完整初始化并灌入静态 Projectile._context
+                    FishingContext context = new FishingContext();
+                    context.Fisher = attempt;
+                    context.Player = player;
+
+                    // 计算互斥生态与复合沙漠判定
+                    bool flagCorrupt = player.ZoneCorrupt;
+                    bool flagCrimson = player.ZoneCrimson;
+                    bool flagJungle = player.ZoneJungle;
+                    bool flagSnow = player.ZoneSnow;
+                    bool flagDesert = player.ZoneDesert;
+
+                    if (flagCorrupt && flagCrimson)
+                    {
+                        if (Main.rand.Next(2) == 0) flagCrimson = false;
+                        else flagCorrupt = false;
+                    }
+                    if (flagSnow && flagJungle && Main.rand.Next(2) == 0)
+                    {
+                        flagSnow = false;
+                    }
+
+                    context.RolledCorruption = flagCorrupt;
+                    context.RolledCrimson = flagCrimson;
+                    context.RolledJungle = flagJungle;
+                    context.RolledSnow = flagSnow;
+                    context.RolledDesert = flagDesert;
+                    context.RolledInfectedDesert = flagDesert && (flagCorrupt || flagCrimson || player.ZoneHallow);
+                    context.RolledRemixOcean = Main.remixWorld && attempt.heightLevel == 1 && (double)attempt.Y >= Main.rockLayer && Main.rand.Next(2) == 0;
+
+                    FiProjectileContext!.SetValue(null, context);
+
+                    // 步骤 4：原版掉落规则引擎结算
                     object[] itemArgs = { attempt };
                     object? itemTarget = MiRollItemDrop!.IsStatic ? null : proj;
                     MiRollItemDrop!.Invoke(itemTarget, itemArgs);
                     attempt = (FishingAttempt)itemArgs[0];
 
                     dropItem = attempt.rolledItemDrop;
-                    usedVanillaPath = dropItem > 0;
+                    vanillaSuccess = true;
                 }
                 catch (Exception ex)
                 {
+                    vanillaSuccess = false;
                     FallbackFailureCount++;
                     if (FallbackFailureCount == 1 || FallbackFailureCount % 50 == 0)
                     {
                         TShock.Log.ConsoleError(
                             $"[AutoFish] 原版掉落链路调用异常（累计 {FallbackFailureCount} 次），" +
-                            $"本次及此前调用均回退到自定义掉落池，掉落分布仅为近似值: {ex}");
+                            $"已回退至自定义掉落池: {ex}");
                     }
                 }
             }
 
-            if (!usedVanillaPath)
-            {
-                dropItem = RollRandomBiomeFish(player, attempt);
-                FallbackUseCount++;
-            }
-            else
+            if (vanillaSuccess)
             {
                 VanillaUseCount++;
             }
+            else
+            {
+                // 仅在反射异常时回退到兜底表
+                dropItem = RollRandomBiomeFish(player, attempt);
+                FallbackUseCount++;
+            }
 
+            // 原版合法空钩或无掉落产物时直接返回
             if (dropItem <= 0)
-                return; // 相当于原版的“摸到垃圾/空军”，不产出物品
+                return;
 
             int itemIndex = Item.NewItem(null, (int)player.position.X, (int)player.position.Y, player.width, player.height, dropItem);
             if (itemIndex >= 0 && itemIndex < Main.maxItems)
@@ -446,6 +526,9 @@ namespace AutoFishPlugin
 
             if (attempt.inLava)
             {
+                if (!attempt.CanFishInLava)
+                    return 0;
+
                 int[] lavaDrops = Main.hardMode
                     ? new int[] { ItemID.ObsidianSwordfish, ItemID.FlarefinKoi, ItemID.Obsidifish, ItemID.LavaCrateHard }
                     : new int[] { ItemID.FlarefinKoi, ItemID.Obsidifish, ItemID.LavaCrate };
@@ -544,7 +627,8 @@ namespace AutoFishPlugin
             for (int i = 0; i < 58; i++)
             {
                 Item item = player.inventory[i];
-                if (item != null && item.stack > 0 && item.bait > 0)
+                // 忽略松露虫，防止挂机自动消耗
+                if (item != null && item.stack > 0 && item.bait > 0 && item.type != ItemID.TruffleWorm)
                 {
                     float baseChance = 1f / (1f + item.bait / 6f);
                     float finalChance = Math.Clamp(baseChance * multiplier, 0f, 1f);
@@ -567,7 +651,7 @@ namespace AutoFishPlugin
             for (int i = 0; i < 58; i++)
             {
                 Item item = player.inventory[i];
-                if (item != null && item.stack > 0 && item.bait > 0)
+                if (item != null && item.stack > 0 && item.bait > 0 && item.type != ItemID.TruffleWorm)
                     return true;
             }
             return false;
