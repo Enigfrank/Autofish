@@ -251,7 +251,7 @@ namespace AutoFishPlugin
                                 state.Enabled = false;
                                 proj.active = false;
                                 proj.Kill();
-                                NetMessage.SendData(29, -1, -1, null, proj.identity, owner);
+                                NetMessage.SendData(29, -1, -1, null, proj.whoAmI, owner);
                                 continue;
                             }
 
@@ -260,7 +260,7 @@ namespace AutoFishPlugin
 
                             proj.active = false;
                             proj.Kill();
-                            NetMessage.SendData(29, -1, -1, null, proj.identity, owner);
+                            NetMessage.SendData(29, -1, -1, null, proj.whoAmI, owner);
 
                             state.WaterTicks = 0;
                             state.WaitingRecast = true;
